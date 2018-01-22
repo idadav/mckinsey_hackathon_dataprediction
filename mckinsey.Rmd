@@ -1,0 +1,184 @@
+---
+title: "McKinsey Hackathon"
+author: "Ida Davidsson"
+date: "20/01/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+Loading the data and the required libraries
+```{r data and library setup}
+conversions = read.csv("train.csv", stringsAsFactors=FALSE)
+test_df = read.csv("test.csv")
+
+library(tidyverse)
+library(eeptools)
+library(lubridate)
+library(caret)
+library(MASS)
+library(randomForest)
+```
+
+
+Time to do some Feature Engineering.. I start with converting the Date of Birth (DOB) to age in years, as this makes binning easier (15 entires have NA age, so I set these to 0 as they are such a small amount and this will make the binning process easier). I then bin age and salary, and create a new variable called debt_to_income, which is the maonthly income post EMI payments divided by the loan amount.
+```{r feature engineering}
+# converting DOB to age in years
+conversions = conversions %>%
+  mutate(DOB = as.Date(conversions$DOB, "%d/%m/%y"))
+
+conversions$year <- format(as.Date(conversions$DOB), "%Y")
+conversions$year = as.numeric(conversions$year)
+
+date = conversions$DOB
+
+conversions$age = 2018 - year(date)
+conversions$age = abs(conversions$age)
+
+conversions$age[is.na(conversions$age)] = 0
+
+# binning age into 3 categories (based on "middle age" being considered 45-65)
+conversions = conversions %>%
+  mutate(age_bracket = ifelse(age >= 45 & age <= 65, "middle_aged",
+                         ifelse(age >= 18 & age < 45, "young_adult", "senior"))
+  )
+
+# binning income into 3 categories ($22,865.10 being the US federal govt for low income, and $100,000 being considered high income)
+conversions = conversions %>%
+  mutate(income_level = ifelse(Monthly_Income <= 1905, "low", 
+                          ifelse(Monthly_Income > 1905 & Monthly_Income < 8334, "middle", "high")))
+
+# Debt to income (after withdrawing current EMI)
+conversions = conversions %>%
+  mutate(income_post_EMI = Monthly_Income - Existing_EMI)
+
+conversions = conversions %>%
+  mutate(debt_to_income = conversions$income_post_EMI/conversions$Loan_Amount)
+
+conversions$debt_to_income[is.na(conversions$debt_to_income)] = 0
+
+# Binning of debt_to_income
+conversions = conversions %>%
+  mutate(debt_level = ifelse(debt_to_income > 0 & debt_to_income < 0.43, "within_limit", ifelse(debt_to_income == 0, "debt_free", "high")))
+
+
+```
+
+I think create a dataset with the variables I think could be valid for my model, and transform the relevant ones to factor variables.
+```{r variable selection}
+# create dataset with variables I want to use in my stepwise selection
+conversions1 = conversions %>%
+  dplyr::select(Approved, Gender, age_bracket, income_level, City_Category,
+         Employer_Category1, Employer_Category2,
+         Customer_Existing_Primary_Bank_Code, Primary_Bank_Type, Contacted,
+         Source_Category, debt_level, Var1)
+
+conversions1$Gender = as.factor(conversions1$Gender)
+conversions1$age_bracket = as.factor(conversions1$age_bracket)
+conversions1$income_level = as.factor(conversions1$income_level)
+conversions1$City_Category = as.factor(conversions1$City_Category)
+conversions1$Employer_Category1 = as.factor(conversions1$Employer_Category1)
+conversions1$Employer_Category2 = as.factor(conversions1$Employer_Category2)
+conversions1$Customer_Existing_Primary_Bank_Code =
+  as.factor(conversions1$Customer_Existing_Primary_Bank_Code)
+conversions1$Primary_Bank_Type = as.factor(conversions1$Primary_Bank_Type)
+conversions1$Source_Category = as.factor(conversions1$Source_Category)
+conversions1$Contacted = as.factor(conversions1$Contacted)
+conversions1$debt_level = as.factor(conversions1$debt_level)
+
+
+```
+
+Next up, I use the stepwise variable selection process to identify statistically significant variables. Then I try model output as a logistic regression. 
+```{r stepwise and logit}
+# Stepwise selection to see which variables to use
+null_state = lm(data=conversions1, Approved ~ 1)
+full_state = lm(data=conversions1, Approved ~ .)
+
+stepwise = stepAIC(null_state, scope=list(lower=null_state, upper=full_state),
+                   direction="forward", na.rm=TRUE)
+
+stepwise$anova
+summary(stepwise)
+
+# first model from the result of the stepwise selection
+m1_logit = glm(Approved ~ income_level + Primary_Bank_Type + Employer_Category1 + 
+    debt_level + Gender + age_bracket,
+    data=conversions1, na.action=na.exclude)
+
+summary(m1_logit)
+anova(m1_logit, test="Chisq")
+
+m1_logit
+
+```
+
+
+Now it's time to try the logit regression model on the test data. I first make the necessary transformations.
+```{r logit test}
+# converting DOB to age in years
+test_df = test_df %>%
+  mutate(DOB = as.Date(test_df$DOB, "%d/%m/%y"))
+
+test_df$year <- format(as.Date(test_df$DOB), "%Y")
+test_df$year = as.numeric(test_df$year)
+
+date = test_df$DOB
+
+test_df$age = 2018 - year(date)
+test_df$age = abs(test_df$age)
+
+test_df$age[is.na(test_df$age)] = 0
+
+# binning age into 3 categories (based on "middle age" being considered 45-65)
+test_df = test_df %>%
+  mutate(age_bracket = ifelse(age >= 45 & age <= 65, "middle_aged",
+                         ifelse(age >= 18 & age < 45, "young_adult", "senior")))
+  
+
+# binning income into 3 categories ($22,865.10 being the US federal govt for low income, and $100,000 being considered high income)
+test_df = test_df %>%
+  mutate(income_level = ifelse(Monthly_Income <= 1905, "low", 
+                          ifelse(Monthly_Income > 1905 & Monthly_Income < 8334, "middle", "high")))
+
+# Debt to income (after withdrawing current EMI)
+test_df = test_df %>%
+  mutate(income_post_EMI = Monthly_Income - Existing_EMI)
+
+test_df = test_df %>%
+  mutate(debt_to_income = test_df$income_post_EMI/test_df$Loan_Amount)
+
+test_df$debt_to_income[is.na(test_df$debt_to_income)] = 0
+
+# Binning of debt_to_income
+test_df = test_df %>%
+  mutate(debt_level = ifelse(debt_to_income > 0 & debt_to_income < 0.43, "within_limit", ifelse(debt_to_income == 0, "debt_free", "high")))
+
+# converting to factor
+test_df$Employer_Category2 = as.factor(test_df$Employer_Category2)
+test_df$age_bracket = as.factor(test_df$age_bracket)
+test_df$income_level = as.factor(test_df$income_level)
+test_df$debt_level = as.factor(test_df$debt_level)
+
+
+# PREDICT with LOGIT REGRESSION
+test_df1 = test_df %>%
+  mutate(pred_approved = predict(m1_logit, newdata=test_df, type='response'))
+```
+
+I had a decent ROC AUC with the logit model, but I wanted to see if this could be improved using a random forest model, so I decided to try that. I achieved a slightly better ROC AUC of 0.764.
+```{r random forest}
+sapply(conversions1, function(x) sum(is.na(x)))
+
+m1_rf = randomForest(Approved ~ income_level + Primary_Bank_Type +
+                       Employer_Category1 + debt_level + Gender + age_bracket,
+                     data=conversions1)
+m1_rf
+
+test_df2 = test_df %>%
+  mutate(approved = predict(m1_rf, newdata=test_df))
+```
+
